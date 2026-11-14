@@ -85,12 +85,15 @@ ARGS=(
     --scene "$SCENE"
     --selection-plan "$PLAN"
     --expected-frames "$EXPECTED_FRAMES"
-    --num-primary 12
+    --num-primary "${NUM_PRIMARY:-12}"
     --num-targets 8
     --support-offset 0.25
     --render-chunk 8
     --warmups 3
 )
+if [ "${PRIMARY_ONLY:-0}" = "1" ]; then
+    ARGS+=(--primary-only)
+fi
 
 printf '%q ' "$PYTHON" tools/run_one_scene_comparison.py \
     "${ARGS[@]}" --out "$RUN_ROOT/comparison" --save-gaussians \
