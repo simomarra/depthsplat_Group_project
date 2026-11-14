@@ -39,6 +39,10 @@ def parse_args():
         '--selection-plan', type=Path,
         help='Saved first-loop selection, mapped using image IDs'
     )
+    parser.add_argument(
+        '--primary-only', action='store_true',
+        help='Run FPS and uniform primaries without support conditions'
+    )
     parser.add_argument('--checkpoint', type=Path, help='Same full-model checkpoint used for baseline')
     parser.add_argument('--dataset-root', type=Path, required=True, help='Converted dataset containing test/index.json')
     parser.add_argument('--scene', required=True)
@@ -262,7 +266,7 @@ def main():
         for method in ('fps', 'trajectory'):
             primary = plan['methods'][method]['primary']
             for use_support in (False, True):
-                if method == 'fps' and use_support:
+                if use_support and (args.primary_only or method == 'fps'):
                     continue
 
                 label = method + ('_support' if use_support else '_primary_only')
@@ -357,7 +361,10 @@ def main():
                 except Exception as error:
                     write(folder / 'status.json', {'status':'failed', 'error':repr(error)})
                     raise
-    print('All three conditions complete. One-scene exploratory result only.', flush=True)
+    print(
+        f'All {len(summary)} conditions complete. One-scene exploratory result only.',
+        flush=True,
+    )
 
 
 if __name__ == '__main__':
