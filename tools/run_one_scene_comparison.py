@@ -35,6 +35,10 @@ def sha256(path):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True, help='Baseline resolved_config.yaml')
+    parser.add_argument(
+        '--selection-plan', type=Path,
+        help='Saved first-loop selection, mapped using image IDs'
+    )
     parser.add_argument('--checkpoint', type=Path, help='Same full-model checkpoint used for baseline')
     parser.add_argument('--dataset-root', type=Path, required=True, help='Converted dataset containing test/index.json')
     parser.add_argument('--scene', required=True)
@@ -120,15 +124,48 @@ def main():
         return np.sort(rows)
 
     selection_start = time.perf_counter()
-    plan = make_plan(extrinsics[:, :3, 3].numpy(), args.num_primary,
-                     args.num_targets, args.support_offset, fps=original_fps)
-    selection_seconds = time.perf_counter() - selection_start
-    plan.update(scene=args.scene, dataset_chunk=str(chunk_path.resolve()),
-                fps='original repository farthest_point_sample on float32 CPU poses',
-                selection_seconds_both_methods=selection_seconds,
-                frame_order='converted dataset row order; IDs are not raw image filenames')
+    if args.selection_plan:
+        from saved_loop_plan import load_saved_loop_plan
+
+        saved = json.loads(args.selection_plan.read_text())
+        plan = load_saved_loop_plan(
+            saved,
+            example['timestamps'].cpu().numpy(),
+            args.scene,
+            args.num_primary,
+            args.num_targets,
+        )
+        if not np.isclose(args.support_offset, plan['support_offset']):
+            raise ValueError('Support offset disagrees with the saved plan.')
+
+        plan.update(
+            selection_plan_sha256=sha256(args.selection_plan),
+            mapping_validation_seconds=time.perf_counter() - selection_start,
+            selection_seconds_both_methods=None,
+            selection_time_note='Saved selection; only frame-ID mapping timed.',
+        )
+    else:
+        plan = make_plan(
+            extrinsics[:, :3, 3].numpy(),
+            args.num_primary,
+            args.num_targets,
+            args.support_offset,
+            fps=original_fps,
+        )
+        plan.update(
+            fps='original repository farthest_point_sample on float32 CPU poses',
+            selection_seconds_both_methods=time.perf_counter() - selection_start,
+            frame_order='converted dataset row order',
+        )
+
+    plan.update(
+        scene=args.scene,
+        dataset_chunk=str(chunk_path.resolve()),
+    )
     args.out.mkdir(parents=True, exist_ok=False)
     write(args.out / 'selection.json', plan)
+    if args.selection_plan:
+        write(args.out / 'saved_selection_input.json', saved)
     OmegaConf.save(config, args.out / 'resolved_config.yaml', resolve=True)
     np.savez(args.out / 'full_scene_cameras.npz', extrinsics=extrinsics.numpy(), intrinsics=intrinsics.numpy())
     print(json.dumps(plan, indent=2), flush=True)
