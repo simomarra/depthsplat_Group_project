@@ -65,7 +65,16 @@ def export_ply(
 
 def save_gaussian_ply(gaussians, visualization_dump, example, save_path):
 
-    v, _, h, w = example["context"]["image"].shape[1:]
+    context_views, _, h, w = example["context"]["image"].shape[1:]
+    # Support images do not generate Gaussians. The saved depth tensor uses
+    # precisely the primary-view layout, including in primary/support mode.
+    v = visualization_dump["depth"].shape[1]
+    if not 1 <= v <= context_views:
+        raise ValueError("Invalid Gaussian-generating view count for PLY export.")
+    count = gaussians.means.shape[1]
+    if count % (v * h * w):
+        raise ValueError("Gaussian count does not match the primary image layout.")
+    spp = count // (v * h * w)
 
     # Transform means into camera space.
     means = rearrange(
@@ -87,11 +96,11 @@ def save_gaussian_ply(gaussians, visualization_dump, example, save_path):
     # convert the rotations from camera space to world space as required
     cam_rotations = trim(visualization_dump["rotations"])[0]
     c2w_mat = repeat(
-        example["context"]["extrinsics"][0, :, :3, :3],
+        example["context"]["extrinsics"][0, :v, :3, :3],
         "v a b -> h w spp v a b",
         h=h,
         w=w,
-        spp=1,
+        spp=spp,
     )
     c2w_mat = c2w_mat[mask]  # apply trim
 

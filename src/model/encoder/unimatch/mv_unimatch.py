@@ -13,6 +13,7 @@ from .utils import mv_feature_add_position
 from .dpt_head import DPTHead
 from .ldm_unet.unet import UNetModel, AttentionBlock
 from einops import rearrange
+from .primary_support import select_primary_features, batch_primary_matching
 
 
 class MultiViewUniMatch(nn.Module):
@@ -234,6 +235,7 @@ class MultiViewUniMatch(nn.Module):
         num_depth_candidates=128,
         extrinsics=None,
         nn_matrix=None,
+        num_primary_views=None,
         **kwargs,
     ):
 
@@ -245,8 +247,16 @@ class MultiViewUniMatch(nn.Module):
         images = self.normalize_images(images)
         b, v, _, ori_h, ori_w = images.shape
 
+        input_views = v
+        primary_count = v if num_primary_views is None else num_primary_views
+        if not isinstance(primary_count, int) or not 2 <= primary_count <= v:
+            raise ValueError("Invalid primary view count.")
+        support_mode = primary_count < v
+        if support_mode and (self.training or nn_matrix is None):
+            raise ValueError("Support mode requires evaluation and explicit neighbours.")
+
         # update the num_views in unet attention, useful for random input views
-        set_num_views(self.regressor, num_views=v)
+        set_num_views(self.regressor, num_views=primary_count)
 
         # NOTE: in this codebase, intrinsics are normalized by image width and height
         # in unimatch's codebase: https://github.com/autonomousvision/unimatch, no normalization
@@ -255,8 +265,8 @@ class MultiViewUniMatch(nn.Module):
         intrinsics[:, :, 1] *= ori_h
 
         # max_depth, min_depth: [B, V] -> [BV]
-        max_depth = max_depth.view(-1)
-        min_depth = min_depth.view(-1)
+        max_depth = max_depth[:, :primary_count].reshape(-1)
+        min_depth = min_depth[:, :primary_count].reshape(-1)
 
         # list of features, resolution low to high
         # list of [BV, C, H, W]
@@ -299,6 +309,30 @@ class MultiViewUniMatch(nn.Module):
             features_list_mv = [features_mv]
 
         results_dict.update({"features_mv": features_list_mv})
+
+        # Keep all matching-source features, but regress depth only for primaries.
+        source_features_mv = features_list_mv
+        source_intrinsics = intrinsics
+        source_extrinsics = extrinsics
+        if support_mode:
+            images = images[:, :primary_count]
+            intrinsics = intrinsics[:, :primary_count]
+            extrinsics = extrinsics[:, :primary_count]
+            features_list_cnn_all_scales = [
+                select_primary_features(x, b, input_views, primary_count)
+                for x in features_list_cnn_all_scales
+            ]
+            features_list_cnn = features_list_cnn_all_scales[:self.num_scales]
+            features_list_mv = [
+                select_primary_features(x, b, input_views, primary_count)
+                for x in features_list_mv
+            ]
+            v = primary_count
+            results_dict.update({
+                "features_cnn_all_scales": features_list_cnn_all_scales,
+                "features_cnn": features_list_cnn,
+                "features_mv": features_list_mv,
+            })
 
         # mono feature
         ori_h, ori_w = images.shape[-2:]
@@ -364,7 +398,7 @@ class MultiViewUniMatch(nn.Module):
             )
 
             # scale intrinsics
-            intrinsics_curr = intrinsics.clone()  # [B, V, 3, 3]
+            intrinsics_curr = source_intrinsics.clone()  # all matching sources
             intrinsics_curr[:, :, :2] = intrinsics_curr[:, :, :2] / downsample_factor
 
             # build cost volume
@@ -373,14 +407,15 @@ class MultiViewUniMatch(nn.Module):
             # list of [B, C, H, W]
             features_mv_curr = list(
                 torch.unbind(
-                    rearrange(features_mv, "(b v) c h w -> b v c h w", b=b, v=v), dim=1
+                    rearrange(source_features_mv[scale_idx],
+                              "(b v) c h w -> b v c h w", b=b, v=input_views), dim=1
                 )
             )
 
             intrinsics_curr = list(
                 torch.unbind(intrinsics_curr, dim=1)
             )  # list of [B, 3, 3]
-            extrinsics_curr = list(torch.unbind(extrinsics, dim=1))  # list of [B, 4, 4]
+            extrinsics_curr = list(torch.unbind(source_extrinsics, dim=1))
 
             # ref: [BV, C, H, W], [BV, 3, 3], [BV, 4, 4]
             # tgt: [BV, V-1, C, H, W], [BV, V-1, 3, 3], [BV, V-1, 4, 4]
@@ -391,11 +426,11 @@ class MultiViewUniMatch(nn.Module):
                 tgt_features,
                 tgt_intrinsics,
                 tgt_extrinsics,
-            ) = batch_features_camera_parameters(
+            ) = (batch_primary_matching if support_mode else batch_features_camera_parameters)(
                 features_mv_curr,
                 intrinsics_curr,
                 extrinsics_curr,
-                nn_matrix=nn_matrix,
+                nn_matrix=nn_matrix[:, :primary_count] if support_mode else nn_matrix,
             )
 
             b_new, _, c, h, w = tgt_features.size()
@@ -474,9 +509,7 @@ class MultiViewUniMatch(nn.Module):
                     .view(-1, num_depth_candidates, h, w)
                 )
 
-            intrinsics_input = torch.stack(intrinsics_curr, dim=1).view(
-                -1, 3, 3
-            )  # [BV, 3, 3]
+            intrinsics_input = ref_intrinsics  # [B * primary_count, 3, 3]
             intrinsics_input = intrinsics_input.unsqueeze(1).repeat(
                 1, tgt_features.size(1), 1, 1
             )  # [BV, V-1, 3, 3]

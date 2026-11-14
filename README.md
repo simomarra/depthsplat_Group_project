@@ -41,6 +41,9 @@ Right: Unsupervised depth pre-training with Gaussian splatting leads to reduced 
 
 ## Installation
 
+For the group's fixed-primary, same-interval support-view pilot, see
+[the experiment setup, results and reproduction instructions](experiments/gap_support/README.md).
+
 Our code is developed using PyTorch 2.4.0, CUDA 12.4, and Python 3.10. 
 
 We recommend setting up a virtual environment using either [conda](https://docs.anaconda.com/miniconda/) or [venv](https://docs.python.org/3/library/venv.html) before installation:

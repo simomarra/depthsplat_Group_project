@@ -1,0 +1,49 @@
+{
+  "provenance": "Transcribed from user-provided HPC console outputs; not a separate local GPU rerun.",
+  "base_commit": "70840a3272450b9e97b48c93dc16d1ded80ec639",
+  "date": "2026-11-14",
+  "scene_count": 2,
+  "targets_per_scene": 8,
+  "interval_inclusive": [
+    0,
+    49
+  ],
+  "resolution_hw": [
+    256,
+    448
+  ],
+  "checkpoint": "depthsplat-gs-base-dl3dv-256x448-randview2-6-02c7b19d.pth",
+  "checkpoint_policy": "frozen; no fine-tuning",
+  "initial_baseline_job": 763386,
+  "paired_evaluation_job": 763429,
+  "ply_export_job": 763445,
+  "baseline": {
+    "psnr": 24.542296409606934,
+    "ssim": 0.8174033761024475,
+    "lpips": 0.12623437121510506,
+    "gaussians_per_scene": 688128,
+    "mean_encoder_seconds": 0.8076053857803345,
+    "mean_decoder_seconds_per_target": 0.006887778639793396
+  },
+  "support": {
+    "psnr": 18.085375785827637,
+    "ssim": 0.6968226134777069,
+    "lpips": 0.23925446718931198,
+    "gaussians_per_scene": 688128,
+    "mean_encoder_seconds": 0.8681240081787109,
+    "mean_decoder_seconds_per_target": 0.005605772137641907
+  },
+  "timing_limit": "Two encoder calls; diagnostic timings without a dedicated warm-up protocol.",
+  "matching": "Two nearest neighbours from the available pool; all 12 primary-to-source links were support links in each scene.",
+  "ply_files": {
+    "count": 4,
+    "bytes_per_file": 42301856,
+    "provenance": "User-provided file listing, not inspected local PLY files."
+  },
+  "interpretation": "All rendering metrics worsened for this two-scene configuration. This does not establish the cause or generalize to all support-view methods.",
+  "support_minus_baseline": {
+    "psnr": -6.456920623779297,
+    "ssim": -0.1205807626247406,
+    "lpips": 0.11302009597420692
+  }
+}

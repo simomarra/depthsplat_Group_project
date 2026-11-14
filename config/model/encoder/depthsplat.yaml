@@ -29,6 +29,7 @@ downscale_factor: 4
 shim_patch_size: 4
 
 local_mv_match: 2
+num_primary_views: 0
 
 # monodepth
 monodepth_vit_type: vits

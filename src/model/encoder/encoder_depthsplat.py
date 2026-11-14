@@ -68,6 +68,10 @@ class EncoderDepthSplatCfg:
     # multi-view matching
     local_mv_match: int
 
+    # Evaluation prototype: first P context views generate depth and Gaussians.
+    # Remaining context views supply features to the matching pool only.
+    num_primary_views: int = 0
+
 
 class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
     def __init__(self, cfg: EncoderDepthSplatCfg) -> None:
@@ -148,15 +152,34 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
 
+        primary_count = self.cfg.num_primary_views
+        if primary_count:
+            if self.training or self.cfg.train_depth_only:
+                raise ValueError("Primary/support mode is implemented for GS evaluation only.")
+            if not 2 <= primary_count <= v:
+                raise ValueError("num_primary_views must lie between 2 and context count.")
+
         if v > 3:
             with torch.no_grad():
                 xyzs = context["extrinsics"][:, :, :3, -1].detach()
                 cameras_dist_matrix = torch.cdist(xyzs, xyzs, p=2)
+                if primary_count and primary_count < v:
+                    # Repeated camera positions must not displace the reference.
+                    cameras_dist_matrix.diagonal(dim1=1, dim2=2).fill_(-1)
                 cameras_dist_index = torch.argsort(cameras_dist_matrix)
 
                 cameras_dist_index = cameras_dist_index[:, :, :(self.cfg.local_mv_match + 1)]
         else:
             cameras_dist_index = None
+
+        if primary_count and primary_count < v:
+            neighbour_rows = cameras_dist_index[:, :primary_count, 1:]
+            neighbour_ids = torch.gather(
+                context["index"], 1, neighbour_rows.reshape(b, -1)
+            ).reshape_as(neighbour_rows)
+            print(f"Support matching neighbours: {neighbour_ids.tolist()}; "
+                  f"support links={(neighbour_rows >= primary_count).sum().item()}",
+                  flush=True)
 
         # depth prediction
         results_dict = self.depth_predictor(
@@ -167,7 +190,17 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
             intrinsics=context["intrinsics"],
             extrinsics=context["extrinsics"],
             nn_matrix=cameras_dist_index,
+            num_primary_views=primary_count or None,
         )
+
+        if primary_count:
+            context = {
+                key: value[:, :primary_count]
+                if isinstance(value, Tensor) and value.ndim >= 2
+                and value.shape[:2] == (b, v) else value
+                for key, value in context.items()
+            }
+            v = primary_count
 
         # list of [B, V, H, W], with all the intermediate depths
         depth_preds = results_dict['depth_preds']
@@ -361,6 +394,10 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
         )
+
+        if not self.training:
+            print(f"Reconstruction: primary_views={v}; "
+                  f"gaussians={gaussians.means.shape[1]}", flush=True)
 
         if self.cfg.return_depth:
             # return depth prediction for supervision

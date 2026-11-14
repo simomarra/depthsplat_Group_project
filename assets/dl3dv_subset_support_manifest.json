@@ -1,0 +1,136 @@
+{
+  "0bfdd020cf475b9c68e4b469d1d1a2d0cad303eefe8b78fb2307855afdaac8be": {
+    "interval": [
+      0,
+      49
+    ],
+    "primary": [
+      7,
+      26,
+      30,
+      34,
+      42,
+      49
+    ],
+    "support": [
+      14,
+      18,
+      24,
+      28,
+      29,
+      32,
+      33,
+      36,
+      40,
+      44,
+      47,
+      46
+    ],
+    "support_pairs": [
+      [
+        14,
+        18
+      ],
+      [
+        24,
+        28
+      ],
+      [
+        29,
+        32
+      ],
+      [
+        33,
+        36
+      ],
+      [
+        40,
+        44
+      ],
+      [
+        47,
+        46
+      ]
+    ],
+    "target": [
+      0,
+      6,
+      13,
+      19,
+      27,
+      35,
+      41,
+      48
+    ],
+    "selection": "two unique frames per primary; trajectory offset 0.25; inward endpoints",
+    "matching": "two nearest other cameras from primary + support pool",
+    "note": "Pairs select the pool; they do not force matching assignments."
+  },
+  "ff592398657b3dfe94153332861985194a3e3c9d199c4a3a27a0ce4038e81ade": {
+    "interval": [
+      0,
+      49
+    ],
+    "primary": [
+      0,
+      12,
+      24,
+      36,
+      42,
+      49
+    ],
+    "support": [
+      3,
+      5,
+      10,
+      15,
+      22,
+      26,
+      33,
+      38,
+      40,
+      45,
+      47,
+      44
+    ],
+    "support_pairs": [
+      [
+        3,
+        5
+      ],
+      [
+        10,
+        15
+      ],
+      [
+        22,
+        26
+      ],
+      [
+        33,
+        38
+      ],
+      [
+        40,
+        45
+      ],
+      [
+        47,
+        44
+      ]
+    ],
+    "target": [
+      1,
+      7,
+      14,
+      20,
+      28,
+      34,
+      41,
+      48
+    ],
+    "selection": "two unique frames per primary; trajectory offset 0.25; inward endpoints",
+    "matching": "two nearest other cameras from primary + support pool",
+    "note": "Pairs select the pool; they do not force matching assignments."
+  }
+}
