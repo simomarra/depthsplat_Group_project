@@ -234,6 +234,7 @@ class MultiViewUniMatch(nn.Module):
         num_depth_candidates=128,
         extrinsics=None,
         nn_matrix=None,
+        primary_rows=None,
         **kwargs,
     ):
 
@@ -513,9 +514,14 @@ class MultiViewUniMatch(nn.Module):
                 (cost_volume, features_cnn, features_mv, features_mono), dim=1
             )
 
-            out = self.regressor[scale_idx](concat) + self.regressor_residual[
-                scale_idx
-            ](concat)
+            out = regress_with_primary_attention(
+                regressor=self.regressor[scale_idx],
+                residual=self.regressor_residual[scale_idx],
+                features=concat,
+                primary_rows=primary_rows,
+                batch_size=b,
+                num_views=v,
+            )
 
             # depth pred
             match_prob = F.softmax(
@@ -587,3 +593,70 @@ def set_num_views(module, num_views):
     ):
         for submodule in module.children():
             set_num_views(submodule, num_views)
+
+def regress_with_primary_attention(
+    regressor, residual, features, primary_rows, batch_size, num_views
+):
+    """Keep primary cross-view attention separate from secondary views.
+
+    Input/output ordering is scene-major: [B*V, C, H, W].
+    Secondary depths are retained, with per-image spatial attention.
+    No learned parameters are added.
+    """
+    if primary_rows is None:
+        set_num_views(regressor, num_views)
+        return regressor(features) + residual(features)
+
+    if regressor.training:
+        raise ValueError("Primary-only depth attention is inference-only.")
+
+    if features.shape[0] != batch_size * num_views:
+        raise ValueError("Unexpected flattened batch/view dimension.")
+
+    rows = primary_rows.to(device=features.device, dtype=torch.long)
+    if rows.ndim != 2 or rows.shape[0] != batch_size:
+        raise ValueError("Expected primary_rows [B, P].")
+
+    num_primary = rows.shape[1]
+    if not 2 <= num_primary <= num_views:
+        raise ValueError("Invalid number of primary views.")
+
+    if ((rows < 0) | (rows >= num_views)).any():
+        raise ValueError("Primary row outside the loaded views.")
+
+    mask = torch.zeros(
+        batch_size, num_views, dtype=torch.bool, device=features.device
+    )
+    mask.scatter_(1, rows, True)
+    if not torch.all(mask.sum(dim=1) == num_primary):
+        raise ValueError("Primary rows must be unique within each scene.")
+
+    offsets = torch.arange(
+        batch_size, device=features.device
+    )[:, None] * num_views
+    primary_indices = (offsets + rows).reshape(-1)
+    secondary_indices = (~mask).reshape(-1).nonzero(as_tuple=True)[0]
+
+    try:
+        set_num_views(regressor, num_primary)
+        primary_features = features.index_select(0, primary_indices)
+        primary_output = (
+            regressor(primary_features) + residual(primary_features)
+        )
+
+        output = primary_output.new_zeros(
+            (batch_size * num_views, *primary_output.shape[1:])
+        )
+        output.index_copy_(0, primary_indices, primary_output)
+
+        if secondary_indices.numel():
+            set_num_views(regressor, 1)
+            secondary_features = features.index_select(0, secondary_indices)
+            secondary_output = (
+                regressor(secondary_features) + residual(secondary_features)
+            )
+            output.index_copy_(0, secondary_indices, secondary_output)
+
+        return output
+    finally:
+        set_num_views(regressor, num_views)

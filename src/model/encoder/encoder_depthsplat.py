@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 from .unimatch.mv_unimatch import MultiViewUniMatch
 from .unimatch.dpt_head import DPTHead
+from .primary_support import prepare_roles, primary_results, primary_context
 
 
 @dataclass
@@ -148,7 +149,13 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
 
-        if v > 3:
+        primary_rows, explicit_neighbors = prepare_roles(context, self.cfg.local_mv_match)
+        if primary_rows is not None and self.training:
+            raise ValueError("Primary/support prototype is inference-only; call encoder.eval().")
+
+        if primary_rows is not None:
+            cameras_dist_index = explicit_neighbors
+        elif v > 3:
             with torch.no_grad():
                 xyzs = context["extrinsics"][:, :, :3, -1].detach()
                 cameras_dist_matrix = torch.cdist(xyzs, xyzs, p=2)
@@ -167,7 +174,21 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
             intrinsics=context["intrinsics"],
             extrinsics=context["extrinsics"],
             nn_matrix=cameras_dist_index,
+            primary_rows=primary_rows,
         )
+
+        # Prototype: preserve all-view depth computation, then route ONLY
+        # primary tensors into the feature upsampler and Gaussian heads.
+        if primary_rows is not None:
+            if visualization_dump is not None:
+                visualization_dump["primary_rows"] = primary_rows.detach().clone()
+                visualization_dump["source_rows"] = context["source_rows"].detach().clone()
+                visualization_dump["matching_neighbors"] = cameras_dist_index.detach().clone()
+                if "index" in context:
+                    visualization_dump["primary_frame_indices"] = primary_context(context, primary_rows)["index"].detach().clone()
+            results_dict = primary_results(results_dict, primary_rows, v)
+            context = primary_context(context, primary_rows)
+            v = primary_rows.shape[1]
 
         # list of [B, V, H, W], with all the intermediate depths
         depth_preds = results_dict['depth_preds']
