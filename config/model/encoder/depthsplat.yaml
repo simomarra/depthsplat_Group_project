@@ -53,3 +53,7 @@ gaussian_regressor_channels: 64
 
 # only depth
 train_depth_only: false
+
+cost_volume_aggregation: mean
+cost_volume_peak_exclusion_radius: 1
+cost_volume_reliability_floor: 0.05

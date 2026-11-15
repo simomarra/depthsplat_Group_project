@@ -9,6 +9,10 @@ from .mv_transformer import (
     batch_features_camera_parameters,
 )
 from .matching import warp_with_pose_depth_candidates
+from .cost_volume_aggregation import (
+    aggregate_valid_sources,
+    source_peak_reliability,
+)
 from .utils import mv_feature_add_position
 from .dpt_head import DPTHead
 from .ldm_unet.unet import UNetModel, AttentionBlock
@@ -32,9 +36,20 @@ class MultiViewUniMatch(nn.Module):
         unet_num_res_blocks=1,
         unet_attn_resolutions=[4],
         grid_sample_disable_cudnn=False,
+        cost_volume_aggregation="mean",
+        cost_volume_peak_exclusion_radius=1,
+        cost_volume_reliability_floor=0.05,
         **kwargs,
     ):
         super(MultiViewUniMatch, self).__init__()
+        if cost_volume_aggregation not in (
+            "mean", "validity", "validity_ambiguity"):
+            raise ValueError(
+                f"Unknown cost-volume aggregation: {cost_volume_aggregation}"
+            )
+        self.cost_volume_aggregation = cost_volume_aggregation
+        self.cost_volume_peak_exclusion_radius = cost_volume_peak_exclusion_radius
+        self.cost_volume_reliability_floor = cost_volume_reliability_floor
 
         # CNN
         self.feature_channels = feature_channels
@@ -47,6 +62,8 @@ class MultiViewUniMatch(nn.Module):
 
         # cost volume
         self.num_depth_candidates = num_depth_candidates
+        self.collect_aggregation_diagnostics = False
+        self.aggregation_diagnostics = []
 
         # upsampler
         vit_feature_channel_dict = {"vits": 384, "vitb": 768, "vitl": 1024}
@@ -238,6 +255,7 @@ class MultiViewUniMatch(nn.Module):
     ):
 
         results_dict = {}
+        self.aggregation_diagnostics = []
         depth_preds = []
         match_probs = []
 
@@ -481,29 +499,110 @@ class MultiViewUniMatch(nn.Module):
                 1, tgt_features.size(1), 1, 1
             )  # [BV, V-1, 3, 3]
 
-            warped_tgt_features = warp_with_pose_depth_candidates(
+            use_validity = (
+                self.cost_volume_aggregation != "mean"
+                or self.collect_aggregation_diagnostics
+            )
+
+            warp_result = warp_with_pose_depth_candidates(
                 rearrange(tgt_features, "b v ... -> (b v) ..."),
                 rearrange(intrinsics_input, "b v ... -> (b v) ..."),
                 rearrange(pose_curr, "b v ... -> (b v) ..."),
-                1.0 / depth_candidates_curr,  # convert inverse depth to depth
+                1.0 / depth_candidates_curr,
                 grid_sample_disable_cudnn=self.grid_sample_disable_cudnn,
-            )  # [BV*(V-1), C, D, H, W]
+                return_validity=use_validity,
+            )
 
-            # ref: [BV, C, H, W]
-            # warped: [BV*(V-1), C, D, H, W] -> [BV, V-1, C, D, H, W]
+            if use_validity:
+                warped_tgt_features, source_validity = warp_result
+                source_validity = rearrange(
+                    source_validity,
+                    "(n k) d h w -> n k d h w",
+                    n=b_new,
+                    k=tgt_features.size(1),
+                )
+            else:
+                warped_tgt_features = warp_result
+
             warped_tgt_features = rearrange(
                 warped_tgt_features,
                 "(b v) ... -> b v ...",
                 b=b_new,
                 v=tgt_features.size(1),
             )
-            # [BV, V-1, D, H, W] -> [BV, D, H, W]
-            # average cross other views
-            cost_volume = (
-                (ref_features.unsqueeze(-3).unsqueeze(1) * warped_tgt_features).sum(2)
-                / (c**0.5)
-            ).mean(1)
 
+            # Separate correlations from each source: [BV, K, D, H, W].
+            source_correlations = (
+                (
+                    ref_features.unsqueeze(-3).unsqueeze(1)
+                    * warped_tgt_features
+                ).sum(2)
+                / (c**0.5)
+            )
+            reliability = None
+            if self.cost_volume_aggregation == "mean":
+                cost_volume = source_correlations.mean(1)
+            elif self.cost_volume_aggregation == "validity":
+                cost_volume = aggregate_valid_sources(
+                    source_correlations, source_validity
+                )
+            elif self.cost_volume_aggregation == "validity_ambiguity":
+                reliability = source_peak_reliability(
+                    source_correlations,
+                    source_validity,
+                    exclusion_radius=self.cost_volume_peak_exclusion_radius,
+                    reliability_floor=self.cost_volume_reliability_floor,
+                )
+                cost_volume = aggregate_valid_sources(
+                    source_correlations,
+                    source_validity,
+                    reliability=reliability,
+                )
+                if self.collect_aggregation_diagnostics:
+                    with torch.no_grad():
+                        valid_count = source_validity.sum(dim=1)
+                        source_count = source_validity.shape[1]
+                        original_mean = source_correlations.mean(dim=1)
+
+                        stats = {
+                            "scale": scale_idx,
+                            "mode": self.cost_volume_aggregation,
+                            "source_count": source_count,
+                            "valid_source_fraction": (
+                                source_validity.float().mean().item()
+                            ),
+                            "all_invalid_fraction": (
+                                (valid_count == 0).float().mean().item()
+                            ),
+                            "one_valid_fraction": (
+                                (valid_count == 1).float().mean().item()
+                            ),
+                            "all_valid_fraction": (
+                                (valid_count == source_count).float().mean().item()
+                            ),
+                            "mean_absolute_cost_change": (
+                                (cost_volume - original_mean).abs().mean().item()
+                            ),
+                        }
+
+                        if reliability is not None:
+                            weights = (
+                                source_validity.to(source_correlations.dtype)
+                                * reliability.unsqueeze(2)
+                            )
+                            denominator = weights.sum(dim=1, keepdim=True)
+                            normalized = weights / denominator.clamp_min(
+                                torch.finfo(weights.dtype).tiny
+                            )
+                            both_valid = valid_count >= 2
+                            maximum_weight = normalized.max(dim=1).values
+                            stats["mean_max_weight_multiple_valid"] = (
+                                maximum_weight[both_valid].mean().item()
+                                if both_valid.any().item() else None
+                            )
+                            stats["reliability_mean"] = reliability.mean().item()
+
+                        self.aggregation_diagnostics.append(stats)
             # regressor
             features_cnn = features_list_cnn[scale_idx]  # [BV, C, H, W]
 

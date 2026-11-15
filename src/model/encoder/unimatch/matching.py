@@ -28,6 +28,7 @@ def warp_with_pose_depth_candidates(
     depth,
     clamp_min_depth=1e-3,
     grid_sample_disable_cudnn=False,
+    return_validity=False,
 ):
     """
     feature1: [B, C, H, W]
@@ -56,6 +57,9 @@ def warp_with_pose_depth_candidates(
             b, 1, d, h * w
         )  # [B, 3, D, H*W]
         points = points + pose[:, :3, -1:].unsqueeze(-1)  # [B, 3, D, H*W]
+        # Source-camera Z before projection and denominator clamping.
+        if return_validity:
+            source_z = points[:, 2]  # [B, D, H*W]
         # reproject to 2D image plane
         points = torch.bmm(intrinsics, points.view(b, 3, -1)).view(
             b, 3, d, h * w
@@ -69,6 +73,20 @@ def warp_with_pose_depth_candidates(
         y_grid = 2 * pixel_coords[:, 1] / (h - 1) - 1
 
         grid = torch.stack([x_grid, y_grid], dim=-1)  # [B, D, H*W, 2]
+        if return_validity:
+            reference_depth = depth.reshape(b, d, h * w)
+            valid = (
+                torch.isfinite(reference_depth)
+                & (reference_depth > 0)
+                & torch.isfinite(source_z)
+                & (source_z > clamp_min_depth)
+                & torch.isfinite(x_grid)
+                & torch.isfinite(y_grid)
+                & (x_grid >= -1)
+                & (x_grid <= 1)
+                & (y_grid >= -1)
+                & (y_grid <= 1)
+            ).reshape(b, d, h, w)
 
     # sample features
     # ref: https://github.com/pytorch/pytorch/issues/88380
@@ -87,4 +105,7 @@ def warp_with_pose_depth_candidates(
             b, c, d, h, w
         )  # [B, C, D, H, W]
 
+
+    if return_validity:
+        return warped_feature, valid
     return warped_feature

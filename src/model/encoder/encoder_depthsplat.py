@@ -67,6 +67,11 @@ class EncoderDepthSplatCfg:
 
     # multi-view matching
     local_mv_match: int
+    cost_volume_aggregation: Literal[
+        "mean", "validity", "validity_ambiguity"
+    ] = "mean"
+    cost_volume_peak_exclusion_radius: int = 1
+    cost_volume_reliability_floor: float = 0.05
 
 
 class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
@@ -80,6 +85,10 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
             vit_type=cfg.monodepth_vit_type,
             unet_channels=cfg.depth_unet_channels,
             grid_sample_disable_cudnn=cfg.grid_sample_disable_cudnn,
+            cost_volume_aggregation=cfg.cost_volume_aggregation,
+            cost_volume_peak_exclusion_radius=cfg.cost_volume_peak_exclusion_radius,
+            cost_volume_reliability_floor=cfg.cost_volume_reliability_floor,
+
         )
 
         if self.cfg.train_depth_only:
@@ -98,7 +107,7 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
                                         num_scales=cfg.num_scales,
                                         )
         feature_upsampler_channels = model_configs[cfg.monodepth_vit_type]["features"]
-        
+
         # gaussians adapter
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
@@ -260,7 +269,7 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
             # [B, V, H*W, 1, 1]
             intermediate_depths = torch.cat(
                 depth_preds[:(num_depths - 1)], dim=0)
-            
+
             intermediate_depths = rearrange(
                 intermediate_depths, "b v h w -> b v (h w) () ()")
 
@@ -277,7 +286,7 @@ class EncoderDepthSplat(Encoder[EncoderDepthSplatCfg]):
         # [B, V, H*W, 1, 1]
         opacities = raw_gaussians[..., :1].sigmoid().unsqueeze(-1)
         raw_gaussians = raw_gaussians[..., 1:]
-        
+
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)
         xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")
