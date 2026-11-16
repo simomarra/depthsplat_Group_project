@@ -42,10 +42,11 @@ entry = entries[int(sys.argv[2])]
 print(entry["scene"])
 print(entry["selection_plan"])
 print(entry["expected_frames"])
+print(entry.get("trajectory_mode", "first_loop"))
 PY
 )
 
-if [ "${#SCENE_INFO[@]}" -ne 3 ]; then
+if [ "${#SCENE_INFO[@]}" -ne 4 ]; then
     echo "Failed to read scene from manifest." >&2
     exit 1
 fi
@@ -53,6 +54,7 @@ fi
 SCENE="${SCENE_INFO[0]}"
 PLAN="${SCENE_INFO[1]}"
 EXPECTED_FRAMES="${SCENE_INFO[2]}"
+TRAJECTORY_MODE="${SCENE_INFO[3]}"
 RUN_ROOT="$PROJECT/outputs/primary_attention_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 
 mkdir "$RUN_ROOT"
@@ -83,7 +85,7 @@ ARGS=(
     --checkpoint "$BASELINE/pretrained/depthsplat-gs-base-dl3dv-256x448-randview2-6-02c7b19d.pth"
     --dataset-root "$BASELINE/data/dl3dv_subset20"
     --scene "$SCENE"
-    --selection-plan "$PLAN"
+    --trajectory-mode "$TRAJECTORY_MODE"
     --expected-frames "$EXPECTED_FRAMES"
     --num-primary "${NUM_PRIMARY:-12}"
     --num-targets 8
@@ -91,6 +93,18 @@ ARGS=(
     --render-chunk 8
     --warmups 3
 )
+case "$TRAJECTORY_MODE" in
+    first_loop)
+        ARGS+=(--selection-plan "$PLAN")
+        ;;
+    full_trajectory)
+        # Select along the complete chronological path without wrapping.
+        ;;
+    *)
+        echo "Unknown trajectory mode: $TRAJECTORY_MODE" >&2
+        exit 1
+        ;;
+esac
 if [ "${PRIMARY_ONLY:-0}" = "1" ]; then
     ARGS+=(--primary-only)
 fi
