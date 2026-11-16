@@ -37,7 +37,18 @@ def parse_args():
     parser.add_argument('--config', type=Path, required=True, help='Baseline resolved_config.yaml')
     parser.add_argument(
         '--selection-plan', type=Path,
+
         help='Saved first-loop selection, mapped using image IDs'
+    )
+    parser.add_argument(
+        '--trajectory-mode',
+        choices=('first_loop', 'full_trajectory'),
+        default=None,
+        help=(
+            'first_loop requires a saved --selection-plan; '
+            'full_trajectory samples the complete path without wrapping. '
+            'If omitted, preserve the previous behavior.'
+        ),
     )
     parser.add_argument(
         '--primary-only', action='store_true',
@@ -127,8 +138,26 @@ def main():
             raise ValueError('Original FPS returned repeated indices; cannot enforce uniqueness.')
         return np.sort(rows)
 
+        # Preserve existing commands while allowing explicit mode selection.
+    trajectory_mode = args.trajectory_mode
+    if trajectory_mode is None:
+        trajectory_mode = (
+            'first_loop' if args.selection_plan else 'full_trajectory'
+        )
+
+    if trajectory_mode == 'first_loop' and args.selection_plan is None:
+        raise ValueError(
+            'first_loop requires --selection-plan. '
+            'Use full_trajectory for an open path.'
+        )
+
+    if trajectory_mode == 'full_trajectory' and args.selection_plan is not None:
+        raise ValueError(
+            'full_trajectory cannot use a saved first-loop --selection-plan.'
+        )
+
     selection_start = time.perf_counter()
-    if args.selection_plan:
+    if trajectory_mode == 'first_loop':
         from saved_loop_plan import load_saved_loop_plan
 
         saved = json.loads(args.selection_plan.read_text())
@@ -149,22 +178,57 @@ def main():
             selection_time_note='Saved selection; only frame-ID mapping timed.',
         )
     else:
+        # These timestamps are the original filename IDs for our conversion.
+        frame_ids = example['timestamps'].detach().cpu().numpy()
+        if (
+            frame_ids.ndim != 1
+            or len(frame_ids) != n
+            or not np.issubdtype(frame_ids.dtype, np.integer)
+            or len(np.unique(frame_ids)) != n
+        ):
+            raise ValueError(
+                'Full-trajectory selection requires unique integer '
+                'frame IDs matching the camera count.'
+            )
+
+        # chronological_order[i] gives the converted row for chronological i.
+        chronological_order = np.argsort(frame_ids, kind='stable')
+        positions = extrinsics[:, :3, 3].detach().cpu().numpy()
+
         plan = make_plan(
-            extrinsics[:, :3, 3].numpy(),
+            positions[chronological_order],
             args.num_primary,
             args.num_targets,
             args.support_offset,
             fps=original_fps,
         )
+
+        # Map selection results back to the untouched image/camera arrays.
+        target_rows = np.asarray(plan['target_indices'], dtype=np.int64)
+        plan['target_indices'] = chronological_order[target_rows].tolist()
+
+        for method in plan['methods'].values():
+            primary = np.asarray(method['primary'], dtype=np.int64)
+            secondary = np.asarray(method['secondary'], dtype=np.int64)
+            method['primary'] = chronological_order[primary].tolist()
+            method['secondary'] = chronological_order[secondary].tolist()
+
         plan.update(
             fps='original repository farthest_point_sample on float32 CPU poses',
             selection_seconds_both_methods=time.perf_counter() - selection_start,
-            frame_order='converted dataset row order',
+            frame_order=(
+                'selected chronologically by filename ID; '
+                'indices refer to original converted dataset rows'
+            ),
+            chronological_to_converted_rows=chronological_order.tolist(),
+            converted_source_frame_ids=frame_ids.tolist(),
+            target_frame_ids=frame_ids[plan['target_indices']].tolist(),
         )
-
     plan.update(
         scene=args.scene,
         dataset_chunk=str(chunk_path.resolve()),
+        trajectory_mode=trajectory_mode,
+        secondary_wraparound=(trajectory_mode == 'first_loop'),
     )
     args.out.mkdir(parents=True, exist_ok=False)
     write(args.out / 'selection.json', plan)
