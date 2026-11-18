@@ -9,6 +9,7 @@ from .mv_transformer import (
     batch_features_camera_parameters,
 )
 from .matching import warp_with_pose_depth_candidates
+from .secondary_matching import preserve_secondary_cnn, replace_primary_secondary_sources
 from .utils import mv_feature_add_position
 from .dpt_head import DPTHead
 from .ldm_unet.unet import UNetModel, AttentionBlock
@@ -234,9 +235,16 @@ class MultiViewUniMatch(nn.Module):
         num_depth_candidates=128,
         extrinsics=None,
         nn_matrix=None,
+        primary_rows=None,
+        secondary_matching_mode="multiview",
         **kwargs,
     ):
 
+        if secondary_matching_mode not in ("multiview", "cnn_pyramid"):
+            raise ValueError("Unknown secondary matching mode.")
+        use_cnn_secondary = secondary_matching_mode == "cnn_pyramid"
+        if use_cnn_secondary and (self.training or primary_rows is None or nn_matrix is None):
+            raise ValueError("CNN-secondary matching requires eval mode and explicit support roles/neighbors.")
         results_dict = {}
         depth_preds = []
         match_probs = []
@@ -265,6 +273,12 @@ class MultiViewUniMatch(nn.Module):
         features_list_cnn = features_list_cnn[: self.num_scales]
         results_dict.update({"features_cnn_all_scales": features_list_cnn_all_scales})
         results_dict.update({"features_cnn": features_list_cnn})
+
+        # Preserve CNN-only secondary descriptors before positions and attention.
+        if use_cnn_secondary:
+            saved_secondary_cnn, saved_secondary_indices = preserve_secondary_cnn(
+                features_list_cnn[0], primary_rows, b, v
+            )
 
         # mv transformer features
         # add position to features
@@ -299,6 +313,14 @@ class MultiViewUniMatch(nn.Module):
             features_list_mv = [features_mv]
 
         results_dict.update({"features_mv": features_list_mv})
+
+        if use_cnn_secondary:
+            # Reuse the SAME frozen pyramid, with no attention on this branch.
+            secondary_pyramid = (self.mv_pyramid(saved_secondary_cnn)
+                                 if self.num_scales > 1 else [saved_secondary_cnn])
+            if len(secondary_pyramid) != len(features_list_mv):
+                raise ValueError("Secondary pyramid scale count mismatch.")
+            results_dict["secondary_matching_audit"] = []
 
         # mono feature
         ori_h, ori_w = images.shape[-2:]
@@ -397,6 +419,22 @@ class MultiViewUniMatch(nn.Module):
                 extrinsics_curr,
                 nn_matrix=nn_matrix,
             )
+
+            if use_cnn_secondary:
+                tgt_features = replace_primary_secondary_sources(
+                    tgt_features, secondary_pyramid[scale_idx], saved_secondary_indices,
+                    primary_rows, nn_matrix, b, v,
+                )
+                results_dict["secondary_matching_audit"].append({
+                    "scale": scale_idx, "mode": "cnn_pyramid",
+                    "primary_descriptor": "multiview",
+                    "secondary_descriptor": "pre_position_cnn_through_existing_mv_pyramid",
+                    "cnn_shape": list(saved_secondary_cnn.shape),
+                    "secondary_matching_shape": list(secondary_pyramid[scale_idx].shape),
+                    "primary_matching_shape": list(ref_features.shape),
+                    "modified_primary_references": int(primary_rows.numel()),
+                    "sources_per_primary": int(tgt_features.shape[1]),
+                })
 
             b_new, _, c, h, w = tgt_features.size()
 
@@ -513,9 +551,14 @@ class MultiViewUniMatch(nn.Module):
                 (cost_volume, features_cnn, features_mv, features_mono), dim=1
             )
 
-            out = self.regressor[scale_idx](concat) + self.regressor_residual[
-                scale_idx
-            ](concat)
+            out = regress_with_primary_attention(
+                regressor=self.regressor[scale_idx],
+                residual=self.regressor_residual[scale_idx],
+                features=concat,
+                primary_rows=primary_rows,
+                batch_size=b,
+                num_views=v,
+            )
 
             # depth pred
             match_prob = F.softmax(
@@ -587,3 +630,70 @@ def set_num_views(module, num_views):
     ):
         for submodule in module.children():
             set_num_views(submodule, num_views)
+
+def regress_with_primary_attention(
+    regressor, residual, features, primary_rows, batch_size, num_views
+):
+    """Keep primary cross-view attention separate from secondary views.
+
+    Input/output ordering is scene-major: [B*V, C, H, W].
+    Secondary depths are retained, with per-image spatial attention.
+    No learned parameters are added.
+    """
+    if primary_rows is None:
+        set_num_views(regressor, num_views)
+        return regressor(features) + residual(features)
+
+    if regressor.training:
+        raise ValueError("Primary-only depth attention is inference-only.")
+
+    if features.shape[0] != batch_size * num_views:
+        raise ValueError("Unexpected flattened batch/view dimension.")
+
+    rows = primary_rows.to(device=features.device, dtype=torch.long)
+    if rows.ndim != 2 or rows.shape[0] != batch_size:
+        raise ValueError("Expected primary_rows [B, P].")
+
+    num_primary = rows.shape[1]
+    if not 2 <= num_primary <= num_views:
+        raise ValueError("Invalid number of primary views.")
+
+    if ((rows < 0) | (rows >= num_views)).any():
+        raise ValueError("Primary row outside the loaded views.")
+
+    mask = torch.zeros(
+        batch_size, num_views, dtype=torch.bool, device=features.device
+    )
+    mask.scatter_(1, rows, True)
+    if not torch.all(mask.sum(dim=1) == num_primary):
+        raise ValueError("Primary rows must be unique within each scene.")
+
+    offsets = torch.arange(
+        batch_size, device=features.device
+    )[:, None] * num_views
+    primary_indices = (offsets + rows).reshape(-1)
+    secondary_indices = (~mask).reshape(-1).nonzero(as_tuple=True)[0]
+
+    try:
+        set_num_views(regressor, num_primary)
+        primary_features = features.index_select(0, primary_indices)
+        primary_output = (
+            regressor(primary_features) + residual(primary_features)
+        )
+
+        output = primary_output.new_zeros(
+            (batch_size * num_views, *primary_output.shape[1:])
+        )
+        output.index_copy_(0, primary_indices, primary_output)
+
+        if secondary_indices.numel():
+            set_num_views(regressor, 1)
+            secondary_features = features.index_select(0, secondary_indices)
+            secondary_output = (
+                regressor(secondary_features) + residual(secondary_features)
+            )
+            output.index_copy_(0, secondary_indices, secondary_output)
+
+        return output
+    finally:
+        set_num_views(regressor, num_views)
