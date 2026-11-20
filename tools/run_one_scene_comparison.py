@@ -301,6 +301,43 @@ def main():
                         save_image(pred[0], folder / 'rendered' / f'{frame:06d}.png')
                         save_image(gt[0], args.out / 'ground_truth' / f'{frame:06d}.png')
                     output_context = primary_context(context, context['primary_rows']) if use_support else context
+
+                    # Diagnostic export: exact preprocessed inputs and neighbor indices.
+                    diagnostic = {}
+                    for group_name, values in (
+                        ("context", context), ("target", target)
+                    ):
+                        for key in ("image", "extrinsics", "intrinsics",
+                                    "near", "far", "index"):
+                            diagnostic[f"{group_name}_{key}"] = (
+                                values[key].detach().cpu().numpy()
+                            )
+                    diagnostic["primary_indices"] = np.asarray(primary)
+                    diagnostic["primary_depth"] = (
+                        dump["depth"].detach().cpu().numpy()
+                    )
+                    if use_support:
+                        neighbor_rows = dump["matching_neighbors"]
+                        diagnostic["primary_rows"] = (
+                            context["primary_rows"].detach().cpu().numpy()
+                        )
+                        diagnostic["source_rows"] = (
+                            context["source_rows"].detach().cpu().numpy()
+                        )
+                    else:
+                        xyz = context["extrinsics"][:, :, :3, -1].detach()
+                        neighbor_rows = torch.argsort(
+                            torch.cdist(xyz, xyz, p=2), dim=-1
+                        )[:, :, :encoder.cfg.local_mv_match + 1]
+                        diagnostic["primary_rows"] = np.arange(
+                            len(primary)
+                        )[None]
+                    diagnostic["matching_neighbors"] = (
+                        neighbor_rows.detach().cpu().numpy()
+                    )
+                    np.savez_compressed(
+                        folder / "diagnostic_inputs.npz", **diagnostic
+                    )
                     for j, frame in enumerate(primary):
                         save_image(output_context['image'][0, j], folder / 'primary' / f'{frame:06d}.png')
                         np.save(folder / f'depth_{frame:06d}.npy', dump['depth'][0,j,:,:,0,0].cpu().numpy())

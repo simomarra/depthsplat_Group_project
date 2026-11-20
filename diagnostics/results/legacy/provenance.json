@@ -1,0 +1,106 @@
+{
+  "base_commit": "f5c372157edc494e85783bb0a7cd7b11c2be6b71",
+  "source_files": [
+    {
+      "path": "support_diag_771900_0/summary.json",
+      "sha256": "73b8069a0ebe8e2cdc601b4fae7326c6f9fbd0fa2732be2eec90dd4ca9c2e3bd"
+    },
+    {
+      "path": "support_diag_771900_0/fps_primary_only/scores_per_target.json",
+      "sha256": "b3bc8b6d39c3055bbd67ef51b19223b6ffb6f9b09385dc6c07b6eef7de0e1399"
+    },
+    {
+      "path": "support_diag_771900_0/fps_support/scores_per_target.json",
+      "sha256": "342875af79c3c6049255b0dbe5c2226e9b9524e122e1662ba44a0a45d3527af7"
+    },
+    {
+      "path": "support_diag_771900_0/trajectory_primary_only/scores_per_target.json",
+      "sha256": "6a267205a7449e3d31bec566192a6e45bd8d43cba47e67746dde63a00e488e94"
+    },
+    {
+      "path": "support_diag_771900_0/trajectory_support/scores_per_target.json",
+      "sha256": "bb94959b8dc56fc2922e8b61d095a6e021d9068279aa234b9a25ec1e05569e2c"
+    },
+    {
+      "path": "support_diag_771900_1/summary.json",
+      "sha256": "e63b9148dcead8cb3748249c27cf973c16f68b476cae1e7cf0db3e1e5072f6cb"
+    },
+    {
+      "path": "support_diag_771900_1/fps_primary_only/scores_per_target.json",
+      "sha256": "d91e60efa87f595d90463c4f260205e2902b9ccd9453601aa020c65ce3d762c8"
+    },
+    {
+      "path": "support_diag_771900_1/fps_support/scores_per_target.json",
+      "sha256": "24698042e8d7e344798a28d9a39a37695e910e2dc4c8941d5fc14ca1175448e7"
+    },
+    {
+      "path": "support_diag_771900_1/trajectory_primary_only/scores_per_target.json",
+      "sha256": "30acc4f5ecc54729ad87133f31f4da9b1573c4052c28c95235f62e174989ff53"
+    },
+    {
+      "path": "support_diag_771900_1/trajectory_support/scores_per_target.json",
+      "sha256": "3baa03a68b7ff99608fea070ffdf391202ce43b6cbc4e90e59fe89f1a526d569"
+    },
+    {
+      "path": "ablation_uniform_scene1_772082/summary.json",
+      "sha256": "02a086c475d9d71995301d57d3f8a39acdc19fce5fb21cb0dd44087a43baba4c"
+    },
+    {
+      "path": "ablation_uniform_scene1_772082/baseline/scores_per_target.json",
+      "sha256": "fc0adc4687d17b0f12ecdd3ef7290049b8f1e13c1f68101f61303571e7bc9fe3"
+    },
+    {
+      "path": "ablation_uniform_scene1_772082/hybrid_support_depth/scores_per_target.json",
+      "sha256": "39cac69396bbe5087d7676d2b1a4d75dacfcf3994b8d32e9e19c67fecc4338e7"
+    },
+    {
+      "path": "ablation_uniform_scene1_772082/hybrid_support_features/scores_per_target.json",
+      "sha256": "b51a02800998d0e4b3518f720f58beadd26d6700daeb4fee897b2b441bcd6fe4"
+    },
+    {
+      "path": "ablation_uniform_scene1_772082/hybrid_support_probs/scores_per_target.json",
+      "sha256": "911e78bf98ecd5830893c3018d604c13c939c083cc76d9450664485e64aa44ae"
+    },
+    {
+      "path": "ablation_uniform_scene1_772082/hybrid_support_all/scores_per_target.json",
+      "sha256": "3ecf9b2f2016bc0a7672b739654cb6fcb8ee7c755d42f42c6f84d3e226b489e3"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/summary.json",
+      "sha256": "3b109a6cf74fefc62d5afb1e2ec1ff5762214b7cfcc46051080473775a677168"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/baseline/scores_per_target.json",
+      "sha256": "fc0adc4687d17b0f12ecdd3ef7290049b8f1e13c1f68101f61303571e7bc9fe3"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/hybrid_support_depth/scores_per_target.json",
+      "sha256": "39cac69396bbe5087d7676d2b1a4d75dacfcf3994b8d32e9e19c67fecc4338e7"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/hybrid_support_cnn/scores_per_target.json",
+      "sha256": "2830888055926c7d55f478b48d8c5314396a5592d03757dd434835a6d3d0e4c9"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/hybrid_support_mono/scores_per_target.json",
+      "sha256": "39cac69396bbe5087d7676d2b1a4d75dacfcf3994b8d32e9e19c67fecc4338e7"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/hybrid_support_mv/scores_per_target.json",
+      "sha256": "88b43374bfb5e4d2cef7d323e2a3ff6e1d331e2e7e060f905d743986429ab7e2"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/hybrid_support_features/scores_per_target.json",
+      "sha256": "b51a02800998d0e4b3518f720f58beadd26d6700daeb4fee897b2b441bcd6fe4"
+    },
+    {
+      "path": "feature_ablation_uniform_scene1_772128/hybrid_support_all/scores_per_target.json",
+      "sha256": "3ecf9b2f2016bc0a7672b739654cb6fcb8ee7c755d42f42c6f84d3e226b489e3"
+    }
+  ],
+  "missing_per_target_files": [
+    "ablation_uniform_scene1_772082/full_support_existing/scores_per_target.json",
+    "feature_ablation_uniform_scene1_772128/full_support_existing/scores_per_target.json"
+  ],
+  "note": "Historical measurements only; means verified where per-target files exist. No new features-only measurements. Historical feature-group ablations used secondary depth."
+}

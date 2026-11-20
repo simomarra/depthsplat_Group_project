@@ -1,0 +1,31 @@
+{
+  "upstream_base": "f5c372157edc494e85783bb0a7cd7b11c2be6b71",
+  "hpc_archive_sha256": "e711afa59dfdefc40b74bee2910b4846adb9ab629b6d1ec5a2cc288a9e786ea6",
+  "selected_original_scripts": {
+    "tools/run_one_scene_comparison.py": "771588d7d2cc845789de08b24e5888c0e1667698d8de422f0b9e2bf11999a451",
+    "tools/run_depth_hybrid.py": "13ebf6bb68704592513e63c3d472ee3d8895a614a6a10bef5a1b7008e486a81f",
+    "tools/run_component_ablation.py": "a57af0952f95f395449c771ac3a88401969d69708d04abf48aa7c2211f271fb8",
+    "tools/run_feature_ablation.py": "5346c3da109aecbb97111fb23a0a068ab33343fccbd0e58af24f131473930fe0",
+    "tools/diagnose_support_depths.py": "11575c51758770edec9b0f75d61f32fcc8f95a08a2a045a2540e4ef79ffe1a9a",
+    "tools/inspect_matching_confidence.py": "36187db754a3b2a1a55e8adae47297e707144b9f47205df2657417692d5b8e84",
+    "tools/inspect_mv_features.py": "0821533979efc0137c9aad621da92824e88e69f3ca97016db12f878abeca26d9"
+  },
+  "upstream_dependencies": [
+    "src/model/encoder/encoder_depthsplat.py",
+    "src/model/encoder/encoder_depthsplat_reference.py",
+    "src/model/encoder/primary_support.py",
+    "src/model/encoder/unimatch",
+    "src/model/encoder/visualization",
+    "src/model/decoder",
+    "src/evaluation/metrics.py",
+    "src/dataset",
+    "src/geometry",
+    "src/misc/image_io.py",
+    "src/config.py",
+    "src/global_cfg.py",
+    "config",
+    "tools/selection_protocol.py",
+    "tools/saved_loop_plan.py"
+  ],
+  "retention": "Original model/config/helper files already exist in required upstream base; not duplicated. New entrypoints use lazy model imports; no imports of excluded calibration runners."
+}

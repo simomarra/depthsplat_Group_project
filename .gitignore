@@ -166,3 +166,13 @@ pretrained
 outputs
 output
 checkpoints
+
+# Reproducible diagnostics: retain code/plans/curated tables, regenerate bulk output.
+*.out
+/diagnostics/generated/
+/diagnostics/local_config*.yaml
+*.npz
+*.npy
+*.pth
+*.ckpt
+*.ply
