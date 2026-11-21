@@ -1,4 +1,4 @@
-"""One-scene, four-condition frozen-checkpoint experiment; run on allocated GPU.
+"""Compare uniform primaries with and without support on one frozen scene.
 
 Use --plan-only first. Requires the original HPC environment and baseline's
 resolved YAML. Does not submit jobs, download data or modify baseline outputs.
@@ -36,31 +36,19 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True, help='Baseline resolved_config.yaml')
     parser.add_argument(
-        '--selection-plan', type=Path,
-
-        help='Saved first-loop selection, mapped using image IDs'
+        '--baseline-inputs', type=Path,
+        help='DL3DV: JSON file listing the separate baseline input frame IDs'
     )
-    parser.add_argument(
-        '--trajectory-mode',
-        choices=('first_loop', 'full_trajectory'),
-        default=None,
-        help=(
-            'first_loop requires a saved --selection-plan; '
-            'full_trajectory samples the complete path without wrapping. '
-            'If omitted, preserve the previous behavior.'
-        ),
-    )
-    parser.add_argument(
-        '--primary-only', action='store_true',
-        help='Run FPS and uniform primaries without support conditions'
-    )
+    parser.add_argument('--hypersim-plan', type=Path, help='Frozen Hypersim view plan JSON')
+    parser.add_argument('--prepared-root', type=Path, help='Folder containing ai_XXX_YYY prepared scenes')
     parser.add_argument('--checkpoint', type=Path, help='Same full-model checkpoint used for baseline')
-    parser.add_argument('--dataset-root', type=Path, required=True, help='Converted dataset containing test/index.json')
+    parser.add_argument('--dataset-root', type=Path, help='Converted DL3DV dataset containing test/index.json')
     parser.add_argument('--scene', required=True)
     parser.add_argument('--out', type=Path, required=True, help='NEW output directory; never overwritten')
     parser.add_argument('--expected-frames', type=int, help='Fail if conversion omitted frames; use 348 for this scene')
     parser.add_argument('--num-primary', type=int, default=6)
-    parser.add_argument('--num-targets', type=int, default=8)
+    parser.add_argument('--num-targets', type=int, default=10)
+    parser.add_argument('--seed', type=int, default=2026, help='Reproducible target selection')
     parser.add_argument('--support-offset', type=float, default=0.25)
     parser.add_argument('--render-chunk', type=int, default=2)
     parser.add_argument('--warmups', type=int, default=1)
@@ -69,43 +57,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    if args.render_chunk < 1 or args.warmups < 1:
-        raise ValueError('Require positive render chunk size and at least one warmup.')
-    import numpy as np
-    import torch
-    from omegaconf import OmegaConf
-    from src.config import load_typed_root_config
-    from src.global_cfg import set_cfg
-    from src.dataset.dataset_dl3dv import DatasetDL3DV
-    from src.dataset.shims.crop_shim import apply_crop_shim
-    from src.dataset.view_sampler.view_sampler_bounded_v2 import farthest_point_sample
-
-    config = OmegaConf.load(args.config)
-    # Saved resolved configuration supplies architecture and preprocessing.
-    config.mode = 'test'
-    config.dataset.roots = [str(args.dataset_root.resolve())]
-    config.dataset.overfit_to_scene = None
-    config.output_dir = str(args.out.resolve())
-    config.wandb.mode = 'disabled'
-    cfg = load_typed_root_config(config)
-    set_cfg(config)
-    if cfg.dataset.name != 'dl3dv' or cfg.model.encoder.name != 'depthsplat':
-        raise ValueError('This runner supports the DL3DV DepthSplat configuration only.')
-    if cfg.model.encoder.local_mv_match != 2:
-        raise ValueError('This protocol needs local_mv_match=2; use the matching baseline configuration.')
-    if cfg.model.encoder.train_depth_only:
-        raise ValueError('A Gaussian reconstruction checkpoint/config is required.')
-    # Keep the saved two-scale architecture and supervision flag unchanged.
-    # MultiViewUniMatch emits intermediate predictions only while training;
-    # eval() returns the final depth even when supervise_intermediate_depth=True.
-    if cfg.model.encoder.num_surfaces != 1 or cfg.model.encoder.gaussians_per_pixel != 1:
-        raise ValueError('First-run Gaussian count/export check expects one surface and Gaussian per pixel.')
-    if cfg.dataset.make_baseline_1 or cfg.dataset.baseline_scale_bounds:
-        raise ValueError('Use the DL3DV baseline configuration with both baseline scaling options false.')
-
-    # Resolve exactly one converted scene, avoiding silent dataset iteration skips.
+def load_dl3dv_scene(args, cfg, DatasetDL3DV, torch, np):
+    """Load one original converted scene and freeze shared target frames."""
+    start = time.perf_counter()
     stage = args.dataset_root / 'test'
     index = json.loads((stage / 'index.json').read_text())
     if args.scene not in index:
@@ -120,9 +74,149 @@ def main():
     extrinsics, intrinsics = dataset.convert_poses(example['cameras'])
     n = len(extrinsics)
     if args.expected_frames is not None and n != args.expected_frames:
-        raise ValueError(f'Converted scene has {n} frames; expected {args.expected_frames}. Reconvert the full scene before this experiment.')
+        raise ValueError(f'Converted scene has {n} frames; expected {args.expected_frames}.')
     if n != len(example['images']):
         raise ValueError('Image/camera count mismatch.')
+    frame_ids = example['timestamps'].detach().cpu().numpy()
+    if (frame_ids.ndim != 1 or len(frame_ids) != n
+            or not np.issubdtype(frame_ids.dtype, np.integer)
+            or len(np.unique(frame_ids)) != n):
+        raise ValueError('Expected one unique integer frame ID per image.')
+    chronological_order = np.argsort(frame_ids, kind='stable')
+    chronological_ids = frame_ids[chronological_order]
+    id_to_row = {str(int(frame_id)): row for row, frame_id in enumerate(chronological_ids)}
+    baseline = json.loads(args.baseline_inputs.read_text(encoding='utf-8'))
+    if baseline.get('scene') != args.scene or len(baseline.get('frame_ids', [])) != 6:
+        raise ValueError('Baseline input file needs the same scene and six input frame IDs.')
+    try:
+        baseline_rows = np.asarray([id_to_row[str(i)] for i in baseline['frame_ids']],
+                                   dtype=np.int64)
+    except KeyError as error:
+        raise ValueError(f'Baseline input frame absent from this scene: {error}') from error
+    scene_seed = int.from_bytes(hashlib.sha256(
+        f'{args.seed}:{args.scene}'.encode()).digest()[:8], 'big')
+    plan = make_plan(extrinsics[chronological_order, :3, 3].numpy(),
+                     baseline_indices=baseline_rows, count=args.num_primary,
+                     target_count=args.num_targets, offset=args.support_offset,
+                     seed=scene_seed)
+    plan['target_indices'] = chronological_order[plan['target_indices']].tolist()
+    plan['baseline_input_indices'] = chronological_order[plan['baseline_input_indices']].tolist()
+    for method in plan['methods'].values():
+        method['primary'] = chronological_order[method['primary']].tolist()
+        method['secondary'] = chronological_order[method['secondary']].tolist()
+    plan.update(scene=args.scene, dataset='dl3dv', dataset_chunk=str(chunk_path.resolve()),
+                trajectory_mode='full_trajectory', selection_seconds=time.perf_counter() - start,
+                chronological_to_converted_rows=chronological_order.tolist(),
+                converted_source_frame_ids=frame_ids.tolist(),
+                target_frame_ids=frame_ids[plan['target_indices']].tolist())
+    return (plan, extrinsics, intrinsics, dataset, example['images'],
+            [str(int(i)) for i in frame_ids])
+
+
+def main():
+    args = parse_args()
+    if args.render_chunk < 1 or args.warmups < 1:
+        raise ValueError('Require positive render chunk size and at least one warmup.')
+    if args.num_primary != 6 or args.num_targets != 10:
+        raise ValueError('Require six primaries and ten held-out targets.')
+    is_hypersim = args.hypersim_plan is not None
+    if is_hypersim:
+        if args.prepared_root is None or args.dataset_root is not None or args.baseline_inputs is not None:
+            raise ValueError('Hypersim requires --hypersim-plan and --prepared-root only.')
+    elif args.dataset_root is None or args.baseline_inputs is None or args.prepared_root is not None:
+        raise ValueError('DL3DV requires --dataset-root and --baseline-inputs.')
+    import numpy as np
+    import torch
+    from PIL import Image
+    from omegaconf import OmegaConf
+    from src.config import load_typed_root_config
+    from src.global_cfg import set_cfg
+    from src.dataset.dataset_dl3dv import DatasetDL3DV
+    from src.dataset.shims.crop_shim import apply_crop_shim    
+    config = OmegaConf.load(args.config)
+    # Saved resolved configuration supplies architecture and preprocessing.
+    config.mode = 'test'
+    config.dataset.roots = [str((args.prepared_root if is_hypersim else args.dataset_root).resolve())]
+    config.dataset.overfit_to_scene = None
+    config.output_dir = str(args.out.resolve())
+    config.wandb.mode = 'disabled'
+    cfg = load_typed_root_config(config)
+    set_cfg(config)
+    if cfg.dataset.name != 'dl3dv' or cfg.model.encoder.name != 'depthsplat':
+        raise ValueError('Requires the frozen DL3DV DepthSplat model configuration.')
+    if cfg.model.encoder.local_mv_match != 2:
+        raise ValueError('This protocol needs local_mv_match=2; use the matching baseline configuration.')
+    if cfg.model.encoder.train_depth_only:
+        raise ValueError('A Gaussian reconstruction checkpoint/config is required.')
+    # Keep the saved two-scale architecture and supervision flag unchanged.
+    # MultiViewUniMatch emits intermediate predictions only while training;
+    # eval() returns the final depth even when supervise_intermediate_depth=True.
+    if cfg.model.encoder.num_surfaces != 1 or cfg.model.encoder.gaussians_per_pixel != 1:
+        raise ValueError('First-run Gaussian count/export check expects one surface and Gaussian per pixel.')
+    if cfg.dataset.make_baseline_1 or cfg.dataset.baseline_scale_bounds:
+        raise ValueError('Use the DL3DV baseline configuration with both baseline scaling options false.')
+
+    if is_hypersim:
+        frozen = json.loads(args.hypersim_plan.read_text(encoding='utf-8'))
+        if frozen.get('dataset') != 'hypersim' or args.scene not in frozen['scenes']:
+            raise ValueError('Scene absent from the frozen Hypersim view plan.')
+        full_plan = frozen['scenes'][args.scene]
+        if args.expected_frames is not None and full_plan['frame_count'] != args.expected_frames:
+            raise ValueError('The expected full scene frame count differs from the frozen plan.')
+        prepared = args.prepared_root / args.scene
+        prep = json.loads((prepared / 'preprocessing.json').read_text(encoding='utf-8'))
+        if (prep.get('scene') != args.scene
+                or prep.get('source_plan_sha256') != sha256(args.hypersim_plan)
+                or prep.get('image_count') != len(full_plan['required_image_frame_keys'])):
+            raise ValueError('Prepared images do not match the frozen view plan.')
+        with np.load(prepared / 'selected_cameras.npz', allow_pickle=False) as cameras:
+            scene_keys = cameras['frame_keys'].tolist()
+            extrinsics = torch.from_numpy(cameras['extrinsics'].copy()).float()
+            intrinsics = torch.from_numpy(cameras['intrinsics'].copy()).float()
+        if scene_keys != full_plan['required_image_frame_keys']:
+            raise ValueError('Prepared cameras are in a different order from the view plan.')
+        image_paths = [prepared / 'images' / f'{key}.png' for key in scene_keys]
+        if any(not path.is_file() for path in image_paths):
+            raise FileNotFoundError('A prepared Hypersim image is missing.')
+        key_to_local = {key: i for i, key in enumerate(scene_keys)}
+        if len(key_to_local) != len(scene_keys):
+            raise ValueError('Repeated prepared camera key.')
+        def local_rows(rows):
+            return [key_to_local[full_plan['frame_keys'][i]] for i in rows]
+        plan = dict(full_plan)
+        plan['target_indices'] = local_rows(full_plan['target_indices'])
+        plan['baseline_input_indices'] = local_rows(full_plan['baseline_input_indices'])
+        plan['methods'] = {
+            name: {'primary': local_rows(method['primary']),
+                   'secondary': [local_rows(pair) for pair in method['secondary']]}
+            for name, method in full_plan['methods'].items()
+        }
+        plan.update(dataset='hypersim', prepared_root=str(prepared.resolve()),
+                    frozen_plan_sha256=sha256(args.hypersim_plan),
+                    preprocessing_sha256=sha256(prepared / 'preprocessing.json'),
+                    selected_frame_keys=scene_keys,
+                    full_scene_target_indices=full_plan['target_indices'],
+                    target_frame_keys=full_plan['target_frame_keys'])
+        n = len(scene_keys)
+        dataset = None
+    else:
+        plan, extrinsics, intrinsics, dataset, image_paths, scene_keys = load_dl3dv_scene(
+            args, cfg, DatasetDL3DV, torch, np)
+        n = len(extrinsics)
+
+    method = plan['methods']['trajectory']
+    primary_rows = method['primary']
+    support_rows = [row for pair in method['secondary'] for row in pair]
+    target_rows = plan['target_indices']
+    baseline_rows = plan['baseline_input_indices']
+    inputs = primary_rows + support_rows + baseline_rows
+    if (len(primary_rows), len(support_rows), len(target_rows), len(baseline_rows)) != (6, 12, 10, 6):
+        raise ValueError('Frozen plan has unexpected condition or target counts.')
+    if (len(set(primary_rows + support_rows)) != 18 or len(set(target_rows)) != 10
+            or set(inputs) & set(target_rows)
+            or any(row < 0 or row >= n for row in inputs + target_rows)):
+        raise ValueError('Frozen selection repeats inputs, overlaps targets or exceeds the scene.')
+
     if not torch.isfinite(extrinsics).all() or not torch.isfinite(intrinsics).all():
         raise ValueError('Nonfinite scene cameras.')
     if not torch.allclose(torch.det(extrinsics[:, :3, :3]), torch.ones(n), atol=1e-4, rtol=1e-4):
@@ -130,112 +224,11 @@ def main():
     from src.geometry.projection import get_fov
     if (get_fov(intrinsics).rad2deg() > cfg.dataset.max_fov).any():
         raise ValueError('Camera field of view exceeds original dataset limit.')
-
-    def original_fps(positions, count):
-        xyz = torch.as_tensor(positions, dtype=torch.float32)[None]
-        rows = farthest_point_sample(xyz, count)[0].cpu().numpy()
-        if len(np.unique(rows)) != count:
-            raise ValueError('Original FPS returned repeated indices; cannot enforce uniqueness.')
-        return np.sort(rows)
-
-        # Preserve existing commands while allowing explicit mode selection.
-    trajectory_mode = args.trajectory_mode
-    if trajectory_mode is None:
-        trajectory_mode = (
-            'first_loop' if args.selection_plan else 'full_trajectory'
-        )
-
-    if trajectory_mode == 'first_loop' and args.selection_plan is None:
-        raise ValueError(
-            'first_loop requires --selection-plan. '
-            'Use full_trajectory for an open path.'
-        )
-
-    if trajectory_mode == 'full_trajectory' and args.selection_plan is not None:
-        raise ValueError(
-            'full_trajectory cannot use a saved first-loop --selection-plan.'
-        )
-
-    selection_start = time.perf_counter()
-    if trajectory_mode == 'first_loop':
-        from saved_loop_plan import load_saved_loop_plan
-
-        saved = json.loads(args.selection_plan.read_text())
-        plan = load_saved_loop_plan(
-            saved,
-            example['timestamps'].cpu().numpy(),
-            args.scene,
-            args.num_primary,
-            args.num_targets,
-        )
-        if not np.isclose(args.support_offset, plan['support_offset']):
-            raise ValueError('Support offset disagrees with the saved plan.')
-
-        plan.update(
-            selection_plan_sha256=sha256(args.selection_plan),
-            mapping_validation_seconds=time.perf_counter() - selection_start,
-            selection_seconds_both_methods=None,
-            selection_time_note='Saved selection; only frame-ID mapping timed.',
-        )
-    else:
-        # These timestamps are the original filename IDs for our conversion.
-        frame_ids = example['timestamps'].detach().cpu().numpy()
-        if (
-            frame_ids.ndim != 1
-            or len(frame_ids) != n
-            or not np.issubdtype(frame_ids.dtype, np.integer)
-            or len(np.unique(frame_ids)) != n
-        ):
-            raise ValueError(
-                'Full-trajectory selection requires unique integer '
-                'frame IDs matching the camera count.'
-            )
-
-        # chronological_order[i] gives the converted row for chronological i.
-        chronological_order = np.argsort(frame_ids, kind='stable')
-        positions = extrinsics[:, :3, 3].detach().cpu().numpy()
-
-        plan = make_plan(
-            positions[chronological_order],
-            args.num_primary,
-            args.num_targets,
-            args.support_offset,
-            fps=original_fps,
-        )
-
-        # Map selection results back to the untouched image/camera arrays.
-        target_rows = np.asarray(plan['target_indices'], dtype=np.int64)
-        plan['target_indices'] = chronological_order[target_rows].tolist()
-
-        for method in plan['methods'].values():
-            primary = np.asarray(method['primary'], dtype=np.int64)
-            secondary = np.asarray(method['secondary'], dtype=np.int64)
-            method['primary'] = chronological_order[primary].tolist()
-            method['secondary'] = chronological_order[secondary].tolist()
-
-        plan.update(
-            fps='original repository farthest_point_sample on float32 CPU poses',
-            selection_seconds_both_methods=time.perf_counter() - selection_start,
-            frame_order=(
-                'selected chronologically by filename ID; '
-                'indices refer to original converted dataset rows'
-            ),
-            chronological_to_converted_rows=chronological_order.tolist(),
-            converted_source_frame_ids=frame_ids.tolist(),
-            target_frame_ids=frame_ids[plan['target_indices']].tolist(),
-        )
-    plan.update(
-        scene=args.scene,
-        dataset_chunk=str(chunk_path.resolve()),
-        trajectory_mode=trajectory_mode,
-        secondary_wraparound=(trajectory_mode == 'first_loop'),
-    )
     args.out.mkdir(parents=True, exist_ok=False)
     write(args.out / 'selection.json', plan)
-    if args.selection_plan:
-        write(args.out / 'saved_selection_input.json', saved)
     OmegaConf.save(config, args.out / 'resolved_config.yaml', resolve=True)
-    np.savez(args.out / 'full_scene_cameras.npz', extrinsics=extrinsics.numpy(), intrinsics=intrinsics.numpy())
+    np.savez(args.out / 'selected_cameras.npz', extrinsics=extrinsics.numpy(),
+             intrinsics=intrinsics.numpy(), frame_keys=np.asarray(scene_keys))
     print(json.dumps(plan, indent=2), flush=True)
     if args.plan_only:
         print('Plan saved. No model constructed and no GPU inference performed.')
@@ -275,6 +268,9 @@ def main():
     code_paths = [ROOT / 'tools/run_one_scene_comparison.py', ROOT / 'tools/selection_protocol.py',
                   ROOT / 'src/model/encoder/encoder_depthsplat.py', ROOT / 'src/model/encoder/primary_support.py',
                   ROOT / 'src/dataset/view_sampler/trajectory_spacing.py', ROOT / 'src/dataset/view_sampler/secondary_selection.py']
+    if is_hypersim:
+        code_paths += [ROOT / 'tools/prepare_hypersim_images.py',
+                       ROOT / 'tools/hypersim_camera_model.py']
     write(args.out / 'environment.json', {
         'gpu': torch.cuda.get_device_name(), 'torch': torch.__version__, 'cuda': torch.version.cuda,
         'python': platform.python_version(), 'checkpoint': str(args.checkpoint.resolve()),
@@ -285,15 +281,33 @@ def main():
         'memory_scope': 'absolute PyTorch peaks for encoder plus decoder including resident model/input tensors; excludes scoring and exports',
         'timing_scope': 'synchronized single measured pass after warmup; preprocessing and shared selection reported separately',
         'prototype': 'all-view depth prediction; primary-only Gaussian branch; global depth-regressor attention retained',
+        'evaluated_dataset': 'hypersim' if is_hypersim else 'dl3dv',
     })
 
     def view_data(rows):
         rows = torch.as_tensor(rows, dtype=torch.long)
-        images = dataset.convert_images([example['images'][i] for i in rows.tolist()])
-        if cfg.dataset.skip_bad_shape and tuple(images.shape[1:]) != (3, *cfg.dataset.ori_image_shape):
-            raise ValueError(f'Unexpected source image shape {images.shape[1:]}.')
+        if is_hypersim:
+            def read_prepared_image(index):
+                with Image.open(image_paths[index]) as source:
+                    pixels = np.asarray(source.convert('RGB')).copy()
+                return torch.from_numpy(pixels).permute(2, 0, 1).float().div_(255)
+            images = torch.stack([read_prepared_image(i) for i in rows.tolist()])
+            near = torch.full((len(rows),), cfg.dataset.near if cfg.dataset.near > 0 else 0.1)
+            far = torch.full((len(rows),), cfg.dataset.far if cfg.dataset.far > 0 else 1000.)
+        else:
+            images = dataset.convert_images([image_paths[i] for i in rows.tolist()])
+            if cfg.dataset.skip_bad_shape and tuple(images.shape[1:]) != (3, *cfg.dataset.ori_image_shape):
+                raise ValueError(f'Unexpected source image shape {images.shape[1:]}.')
+            near, far = dataset.get_bound('near', len(rows)), dataset.get_bound('far', len(rows))
         return {'image': images, 'extrinsics': extrinsics[rows], 'intrinsics': intrinsics[rows],
-                'near': dataset.get_bound('near', len(rows)), 'far': dataset.get_bound('far', len(rows)), 'index': rows}
+                'near': near, 'far': far, 'index': rows}
+
+    def frame_label(row):
+        return (scene_keys[row] if is_hypersim else
+                str(plan['converted_source_frame_ids'][row]))
+
+    def frame_stem(row):
+        return frame_label(row).replace('/', '_').replace('.', '_')
 
     def make_batch(primary, supports):
         loaded = list(primary) + [r for pair in supports for r in pair]
@@ -327,13 +341,10 @@ def main():
 
     summary = []
     with torch.inference_mode():
-        for method in ('fps', 'trajectory'):
+        for method in ('trajectory',):
             primary = plan['methods'][method]['primary']
             for use_support in (False, True):
-                if use_support and (args.primary_only or method == 'fps'):
-                    continue
-
-                label = method + ('_support' if use_support else '_primary_only')
+                label = 'uniform_support' if use_support else 'uniform_primary_only'
                 folder = args.out / label
                 folder.mkdir()
                 write(folder / 'status.json', {'status': 'started'})
@@ -389,17 +400,18 @@ def main():
                     per_target = []
                     for j, frame in enumerate(plan['target_indices']):
                         pred, gt = prediction[j:j+1], target['image'][0, j:j+1]
-                        scores = {'frame_index': frame, 'psnr': compute_psnr(gt, pred).item(),
+                        scores = {'frame_index': frame, 'frame_key': frame_label(frame),
+                                  'psnr': compute_psnr(gt, pred).item(),
                                   'ssim': compute_ssim(gt, pred).item(), 'lpips': compute_lpips(gt, pred).item()}
                         per_target.append(scores)
-                        save_image(pred[0], folder / 'rendered' / f'{frame:06d}.png')
-                        save_image(gt[0], args.out / 'ground_truth' / f'{frame:06d}.png')
+                        save_image(pred[0], folder / 'rendered' / f'{frame_stem(frame)}.png')
+                        save_image(gt[0], args.out / 'ground_truth' / f'{frame_stem(frame)}.png')
                     output_context = primary_context(context, context['primary_rows']) if use_support else context
                     for j, frame in enumerate(primary):
-                        save_image(output_context['image'][0, j], folder / 'primary' / f'{frame:06d}.png')
-                        np.save(folder / f'depth_{frame:06d}.npy', dump['depth'][0,j,:,:,0,0].cpu().numpy())
+                        save_image(output_context['image'][0, j], folder / 'primary' / f'{frame_stem(frame)}.png')
+                        np.save(folder / f'depth_{frame_stem(frame)}.npy', dump['depth'][0,j,:,:,0,0].cpu().numpy())
                     for j, frame in enumerate(context['index'][0].tolist()[args.num_primary:], args.num_primary):
-                        save_image(context['image'][0,j], folder / 'secondary' / f'{frame:06d}.png')
+                        save_image(context['image'][0,j], folder / 'secondary' / f'{frame_stem(frame)}.png')
                     if args.save_gaussians:
                         torch.save({field.name: getattr(gaussians, field.name).cpu() for field in dataclasses.fields(gaussians)}, folder / 'gaussians_full.pt')
                         from src.model.ply_export import save_gaussian_ply
@@ -412,7 +424,8 @@ def main():
                                'preprocess_and_transfer_seconds': preprocess_seconds,
                                'peak_allocated_bytes': allocated, 'peak_reserved_bytes': reserved,
                                'allocated_before_execution_bytes': before, 'gaussian_count': expected,
-                               'target_indices': plan['target_indices']}
+                               'target_indices': plan['target_indices'],
+                               'target_frame_keys': [frame_label(i) for i in plan['target_indices']]}
                     write(folder / 'metrics.json', metrics)
                     write(folder / 'scores_per_target.json', per_target)
                     write(folder / 'status.json', {'status':'complete'})
